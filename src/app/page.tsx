@@ -23,7 +23,7 @@ export default function Home() {
         </div>
         <p>
           One project. Two collaborators.
-          <br />A single payment that pays you both.
+          <br /> A single payment that pays you both.
           <br />
           <strong>Less chasing. More creating.</strong>
         </p>
