@@ -1,8 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  ComputeBudgetProgram,
   Keypair,
   PublicKey,
+  SystemProgram,
+  Transaction,
+  TransactionInstruction,
   type VersionedTransactionResponse,
 } from "@solana/web3.js";
 import { LiteSVM, FailedTransactionMetadata } from "litesvm";
@@ -235,8 +239,15 @@ test("frozen recipient also rolls back the other recipient's transfer", () => {
   assert.equal(amountAt(accounts.destinations[1]), 0n);
 });
 
-test("receipt accepts executed transaction and rejects replay, wrong balances and failure", () => {
+function checkExecutedReceipt(walletFees: boolean) {
   const { svm, transaction, accounts, amountAt, request, payer } = fixture();
+  if (walletFees) {
+    transaction.instructions.unshift(
+      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 375_000 }),
+      ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
+    );
+    transaction.sign(payer);
+  }
   assert.ok(
     !(svm.sendTransaction(transaction) instanceof FailedTransactionMetadata),
   );
@@ -267,6 +278,70 @@ test("receipt accepts executed transaction and rejects replay, wrong balances an
   const receipt = verifyPaymentTransaction(request, signature, response);
   assert.deepEqual(receipt.amounts, ["7000000", "3000000"]);
   assert.equal(receipt.payer, payer.publicKey.toBase58());
+  // Even with valid balance changes, an unrelated transfer or altered payment
+  // instruction must never qualify as this link's receipt.
+  const paymentInstructions = transaction.instructions.filter(
+    (instruction) => !instruction.programId.equals(ComputeBudgetProgram.programId),
+  );
+  const alteredTransfer = new TransactionInstruction({
+    ...paymentInstructions[2],
+    data: Buffer.from(paymentInstructions[2].data),
+  });
+  alteredTransfer.data[1] ^= 1;
+  const alteredReference = new TransactionInstruction({
+    ...paymentInstructions[2],
+    keys: paymentInstructions[2].keys.map((key, index) =>
+      index === 4 ? { ...key, pubkey: Keypair.generate().publicKey } : key,
+    ),
+  });
+  const badFeeAccounts = ComputeBudgetProgram.setComputeUnitPrice({
+    microLamports: 1,
+  });
+  badFeeAccounts.keys.push({
+    pubkey: payer.publicKey,
+    isSigner: true,
+    isWritable: true,
+  });
+  for (const instructions of [
+    [
+      ...transaction.instructions,
+      SystemProgram.transfer({
+        fromPubkey: payer.publicKey,
+        toPubkey: Keypair.generate().publicKey,
+        lamports: 1,
+      }),
+    ],
+    paymentInstructions.map((instruction, i) =>
+      i === 2 ? alteredTransfer : instruction,
+    ),
+    paymentInstructions.map((instruction, i) =>
+      i === 2 ? alteredReference : instruction,
+    ),
+    paymentInstructions.filter((_, i) => i !== 4),
+    [...paymentInstructions, badFeeAccounts],
+    [
+      ...paymentInstructions,
+      ComputeBudgetProgram.requestHeapFrame({ bytes: 32_768 }),
+    ],
+  ]) {
+    const changed = new Transaction({
+      feePayer: payer.publicKey,
+      recentBlockhash: transaction.recentBlockhash,
+    }).add(...instructions);
+    changed.sign(payer);
+    const changedSignature = bs58.encode(changed.signature!);
+    assert.throws(
+      () =>
+        verifyPaymentTransaction(request, changedSignature, {
+          ...response,
+          transaction: {
+            message: changed.compileMessage(),
+            signatures: [changedSignature],
+          },
+        }),
+      /does not match|unsupported wallet fee/,
+    );
+  }
   assert.throws(
     () =>
       verifyPaymentTransaction(
@@ -317,6 +392,14 @@ test("receipt accepts executed transaction and rejects replay, wrong balances an
       ),
     /paying wallet/,
   );
+}
+
+test("receipt verifies executed payment and rejects tampering", () => {
+  checkExecutedReceipt(false);
+});
+
+test("receipt verifies payment with Phantom fee instructions and rejects tampering", () => {
+  checkExecutedReceipt(true);
 });
 
 test("API input refuses oversized JSON and cross-origin mutation", async () => {

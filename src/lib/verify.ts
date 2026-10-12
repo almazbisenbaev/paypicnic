@@ -1,11 +1,18 @@
-import { PublicKey, type VersionedTransactionResponse } from "@solana/web3.js";
+import {
+  ComputeBudgetProgram,
+  PublicKey,
+  Transaction,
+  TransactionMessage,
+  type VersionedTransactionResponse,
+} from "@solana/web3.js";
 import { buildPaymentTransaction, paymentAccounts } from "./transaction";
 import { AppError } from "./errors";
 import { USDC_MINT } from "./config";
 import type { PaymentRequest, Receipt } from "./types";
 
-// Verify the entire message, not merely a signature or a memo. This excludes extra
-// instructions that could transfer the funds back out or bind an unrelated payment.
+// Wallets may add compute-unit limit/price settings before signing. Remove only
+// those account-free settings, then require the entire payment message to match.
+// Extra transfers, changed recipients, amounts, references and memos still fail.
 export function verifyPaymentTransaction(
   request: PaymentRequest,
   signature: string,
@@ -28,8 +35,30 @@ export function verifyPaymentTransaction(
     payer,
     message.recentBlockhash,
   ).compileMessage();
+  const feeSettings = new Set<number>();
+  const instructions = TransactionMessage.decompile(message).instructions.filter(
+    (instruction) => {
+      if (!instruction.programId.equals(ComputeBudgetProgram.programId))
+        return true;
+      const kind = instruction.data[0];
+      const validSetting =
+        (kind === 2 && instruction.data.length === 5) ||
+        (kind === 3 && instruction.data.length === 9);
+      if (!validSetting || instruction.keys.length || feeSettings.has(kind))
+        throw new AppError(
+          "This transaction contains unsupported wallet fee settings.",
+        );
+      feeSettings.add(kind);
+      return false;
+    },
+  );
   if (
-    !Buffer.from(message.serialize()).equals(Buffer.from(expected.serialize()))
+    instructions.length !== expected.instructions.length ||
+    !new Transaction({ feePayer: payer, recentBlockhash: message.recentBlockhash })
+      .add(...instructions)
+      .compileMessage()
+      .serialize()
+      .equals(expected.serialize())
   )
     throw new AppError(
       "This transaction does not match this payment link's recipients, amounts, and reference.",

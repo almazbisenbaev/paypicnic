@@ -1,3 +1,4 @@
+import Image from "next/image";
 import Link from "next/link";
 import { ArrowUpRight, ShieldCheck } from "lucide-react";
 
@@ -6,7 +7,15 @@ export function Header() {
     <header className="site-header">
       <div className="header-inner">
         <Link href="/" className="brand" aria-label="Paypicnic home">
-          Paypicnic
+          <Image
+            src="/paypicnic-logo.webp"
+            alt="Paypicnic"
+            width={660}
+            height={220}
+            className="brand-logo"
+            loading="eager"
+            unoptimized
+          />
         </Link>
         <nav aria-label="Main navigation">
           <Link href="/">Create a link</Link>
